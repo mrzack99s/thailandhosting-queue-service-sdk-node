@@ -1,0 +1,29 @@
+{
+  "name": "@thailandhosting/queue-service",
+  "version": "1.0.0",
+  "description": "Node.js SDK for ThailandHosting Queue Service",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "engines": { "node": ">=18.17" },
+  "repository": { "type": "git", "url": "git+https://github.com/mrzack99s/thailandhosting-queue-service-sdk-node.git" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/*.test.ts",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "keywords": ["thailandhosting", "queue", "message-queue", "jobs", "worker"],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.8.0"
+  }
+}
