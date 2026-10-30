@@ -1,4 +1,4 @@
-import { NotFoundError, QueueServiceError } from './errors.ts';
+import { NotFoundError, QueueServiceError, TokenError } from './errors.ts';
 import { contentDigest, signRequest } from './signing.ts';
 
 export const VERSION = '1.0.0';
@@ -14,9 +14,13 @@ const RETRY_STATUSES = new Set([502, 503, 504]);
 
 export interface ClientOptions {
   /** A Project access key from the Console (Queue Service → Access keys). Requests are signed with
-   *  the secret (HTTP Message Signatures, RFC 9421); the secret itself is never sent. */
-  accessKeyId: string;
-  secretAccessKey: string;
+   *  the secret (HTTP Message Signatures, RFC 9421); the secret itself is never sent.
+   *  Give this or `tokenProvider`, not both. */
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  /** Gives a service account's short-lived token, sent as `Authorization: Bearer` with no signature.
+   *  Called before every attempt, retries included, so it should cache and refresh the token. */
+  tokenProvider?: () => Promise<string> | string;
   /** The queues' region, e.g. `th-bkk-1`, appended to the endpoint. Without one the service finds
    *  each queue's region itself. */
   region?: string;
@@ -148,6 +152,18 @@ const backoff = (n: number) => {
   return d / 2 + Math.random() * (d / 2);
 };
 
+/** The Authorization value from a token provider; its failure is a TokenError. */
+async function bearer(provider: () => Promise<string> | string): Promise<string> {
+  let token: string;
+  try {
+    token = await provider();
+  } catch (err) {
+    throw new TokenError(`queue-service: tokenProvider failed: ${err instanceof Error ? err.message : err}`, err);
+  }
+  if (!token || typeof token !== 'string') throw new TokenError('queue-service: tokenProvider gave no token');
+  return 'Bearer ' + token;
+}
+
 const toDate = (v: unknown) => (typeof v === 'string' ? new Date(v) : new Date(0));
 
 function queueFromJSON(d: any): QueueInfo {
@@ -162,24 +178,30 @@ function messageFromJSON(d: any): Message {
   };
 }
 
-/** Talks to Queue Service with one access key. Reuse it: it keeps connections open. */
+/** Talks to Queue Service with one access key or service account. Reuse it: it keeps connections open. */
 export class Client {
   readonly baseUrl: string; // up to and including /v1
   private readonly keyId: string;
   private readonly secret: string;
+  private readonly tokenProvider?: () => Promise<string> | string;
   private readonly maxRetries: number;
   private readonly userAgent: string;
   private readonly fetch: typeof fetch;
 
   constructor(o: ClientOptions) {
-    if (!o?.accessKeyId || !o?.secretAccessKey) throw new Error('queue-service: accessKeyId and secretAccessKey are required');
+    if (o?.tokenProvider) {
+      if (o.accessKeyId || o.secretAccessKey) throw new Error('queue-service: give an access key or tokenProvider, not both');
+    } else if (!o?.accessKeyId || !o?.secretAccessKey) {
+      throw new Error('queue-service: accessKeyId and secretAccessKey, or tokenProvider, are required');
+    }
     const u = new URL((o.endpoint || DEFAULT_ENDPOINT).replace(/\/+$/, ''));
     if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new Error(`queue-service: invalid endpoint ${o.endpoint}`);
     let path = u.pathname.replace(/\/+$/, '').replace(/\/v1$/, '');
     if (o.region) path += '/' + encodeURIComponent(o.region);
     this.baseUrl = `${u.origin}${path}/v1`;
-    this.keyId = o.accessKeyId;
-    this.secret = o.secretAccessKey;
+    this.keyId = o.accessKeyId ?? '';
+    this.secret = o.secretAccessKey ?? '';
+    this.tokenProvider = o.tokenProvider;
     this.maxRetries = o.maxRetries ?? 4;
     this.userAgent = `thailandhosting-queue-service-sdk-node/${VERSION}${o.userAgent ? ' ' + o.userAgent : ''}`;
     this.fetch = o.fetch ?? globalThis.fetch.bind(globalThis);
@@ -195,7 +217,8 @@ export class Client {
         headers['Content-Type'] = 'application/json';
         headers['Content-Digest'] = contentDigest(body);
       }
-      Object.assign(headers, signRequest({ method, url, accessKeyId: this.keyId, secretAccessKey: this.secret, contentDigest: headers['Content-Digest'] }));
+      if (this.tokenProvider) headers.Authorization = await bearer(this.tokenProvider);
+      else Object.assign(headers, signRequest({ method, url, accessKeyId: this.keyId, secretAccessKey: this.secret, contentDigest: headers['Content-Digest'] }));
       let resp: Response;
       try {
         resp = await this.fetch(url, { method, headers, body, signal, redirect: 'manual' });

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { Client, NotFoundError, QueueServiceError, contentDigest, signRequest } from '../src/index.ts';
+import { Client, NotFoundError, QueueServiceError, TokenError, contentDigest, signRequest } from '../src/index.ts';
 
 test('signature matches the service signer', () => {
   const body = '{"body":"hello"}';
@@ -50,6 +50,75 @@ test('errors and retries', async () => {
   } finally {
     srv.close();
   }
+});
+
+test('a token provider replaces signing, on every attempt', async () => {
+  let answers = 0;
+  let wait: unknown;
+  const srv = createServer((req, res) => {
+    assert.equal(req.headers.signature, undefined);
+    assert.equal(req.headers['signature-input'], undefined);
+    assert.equal(req.headers.authorization, `Bearer tok-${++answers}`);
+    if (req.url!.endsWith('/receive')) {
+      let body = '';
+      req.on('data', (c) => { body += c; }).on('end', () => {
+        wait = JSON.parse(body).wait;
+        res.end('{"messages":[{"id":"m1","receipt":"r1","body":"hello"}]}');
+      });
+      return;
+    }
+    if (answers === 1) {
+      res.writeHead(503, { 'Retry-After': '0' });
+      return res.end();
+    }
+    res.end('{"name":"jobs"}');
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  try {
+    let calls = 0;
+    const c = new Client({ endpoint: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, tokenProvider: async () => `tok-${++calls}` });
+    assert.equal((await c.getQueue('jobs')).name, 'jobs');
+    assert.equal(calls, 2);
+    const got = await c.queue('jobs').receive({ wait: 20 });
+    assert.equal(got[0]!.body, 'hello');
+    assert.equal(wait, 20);
+  } finally {
+    srv.close();
+  }
+});
+
+test('a failing token provider sends nothing, retries nothing and stops a worker', async () => {
+  let answers = 0;
+  const srv = createServer((_req, res) => {
+    answers++;
+    res.end('{}');
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  try {
+    const endpoint = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+    const boom = new Error('boom');
+    let calls = 0;
+    const c = new Client({ endpoint, tokenProvider: () => { calls++; throw boom; } });
+    await assert.rejects(c.getQueue('jobs'), (e: unknown) => e instanceof TokenError && e.cause === boom);
+    assert.equal(calls, 1);
+    // A worker outlives a token outage: it keeps trying until told to stop.
+    const before = calls;
+    await c.queue('jobs').process(() => {}, { signal: AbortSignal.timeout(700), onError: () => {} }).catch(() => {});
+    assert.ok(calls >= before + 2, `process stopped after ${calls - before} calls`);
+    await assert.rejects(new Client({ endpoint, tokenProvider: () => '' }).getQueue('jobs'), TokenError);
+    assert.equal(answers, 0);
+  } finally {
+    srv.close();
+  }
+});
+
+test('an access key or a token provider, not both', () => {
+  const tokenProvider = () => 'tok';
+  assert.throws(() => new Client({}));
+  assert.throws(() => new Client({ accessKeyId: 'k', secretAccessKey: 's', tokenProvider }));
+  assert.throws(() => new Client({ accessKeyId: 'k', tokenProvider }));
+  assert.throws(() => new Client({ secretAccessKey: 's', tokenProvider }));
+  assert.ok(new Client({ tokenProvider }));
 });
 
 const endpoint = process.env.TH_QUEUE_TEST_ENDPOINT;

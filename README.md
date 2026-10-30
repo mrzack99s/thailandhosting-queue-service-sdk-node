@@ -40,6 +40,29 @@ await jobs.process(async (m) => {
 Create access keys in the Console (Queue Service → Access keys). Reuse one
 `Client`: it keeps connections open.
 
+## Using a service account
+
+A program can use a service account's short-lived token instead of an access
+key. Get it with the identity SDK and pass `tokenProvider` in place of the key:
+
+```ts
+import { defaultCredential } from '@thailandhosting/identity';
+
+const cred = defaultCredential();
+const client = new Client({
+  region: 'th-bkk-1',
+  tokenProvider: () => cred.getToken(),
+});
+```
+
+The account needs a grant on the queue, set in the Console. Creating,
+changing and deleting queues takes an access key allowed to manage them.
+
+`tokenProvider` is called before every attempt, so a refreshed token is picked
+up. Give a key or a token provider, not both. If it fails, nothing is sent or
+retried: the call rejects with `TokenError`, and `process` stops and rejects
+with it.
+
 ## Receiving by hand
 
 ```ts
