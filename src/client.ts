@@ -1,7 +1,7 @@
 import { NotFoundError, QueueServiceError, TokenError } from './errors.ts';
 import { contentDigest, signRequest } from './signing.ts';
 
-export const VERSION = '1.0.0';
+export const VERSION = '1.1.1';
 
 /** The Queue Service endpoint. */
 export const DEFAULT_ENDPOINT = 'https://queues.thailandhosting.com';
